@@ -1,0 +1,711 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Settings, Play, Pause, RotateCcw, Plus, Minus, 
+  Undo2, Trophy, Download, Maximize, Minimize, 
+  Check, X, Users, Clock, Hash, Volume2, Printer, Home, AlertTriangle
+} from 'lucide-react';
+
+// --- AUDIO UTILITIES ---
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+const playSound = (type, volume = 1.0) => {
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  
+  const oscillator = audioCtx.createOscillator();
+  const gainNode = audioCtx.createGain();
+  
+  oscillator.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  
+  if (type === 'tick') {
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(1000, audioCtx.currentTime);
+    gainNode.gain.setValueAtTime(volume * 0.15, audioCtx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.05);
+    oscillator.start(audioCtx.currentTime);
+    oscillator.stop(audioCtx.currentTime + 0.05);
+  } else if (type === 'warning') {
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
+    gainNode.gain.setValueAtTime(volume * 0.4, audioCtx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+    oscillator.start(audioCtx.currentTime);
+    oscillator.stop(audioCtx.currentTime + 0.3);
+  } else if (type === 'timeout') {
+    oscillator.type = 'square';
+    const duration = 2.5;
+    for (let i = 0; i < duration; i += 0.4) {
+      oscillator.frequency.setValueAtTime(440, audioCtx.currentTime + i);
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime + i + 0.2);
+    }
+    gainNode.gain.setValueAtTime(volume * 0.5, audioCtx.currentTime);
+    gainNode.gain.linearRampToValueAtTime(volume * 0.5, audioCtx.currentTime + duration - 0.3);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+    oscillator.start(audioCtx.currentTime);
+    oscillator.stop(audioCtx.currentTime + duration);
+  } else if (type === 'click') {
+    oscillator.type = 'triangle';
+    oscillator.frequency.setValueAtTime(600, audioCtx.currentTime);
+    gainNode.gain.setValueAtTime(volume * 0.3, audioCtx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+    oscillator.start(audioCtx.currentTime);
+    oscillator.stop(audioCtx.currentTime + 0.1);
+  }
+};
+
+const TEAM_COLORS = [
+  'bg-blue-600', 'bg-red-600', 'bg-green-600', 'bg-yellow-500', 
+  'bg-purple-600', 'bg-pink-600', 'bg-indigo-600', 'bg-teal-600'
+];
+
+const DEFAULT_SETUP = {
+  eventName: "Lomba Cerdas Cermat",
+  organizer: "",
+  date: new Date().toISOString().split('T')[0],
+  totalQuestions: 10,
+  autoNextQuestion: true,
+  teamCount: 3,
+  teams: [
+    { id: 't1', name: "Tim 1", color: TEAM_COLORS[0], score: 0 },
+    { id: 't2', name: "Tim 2", color: TEAM_COLORS[1], score: 0 },
+    { id: 't3', name: "Tim 3", color: TEAM_COLORS[2], score: 0 },
+  ],
+  timer: { duration: 30, warningAt: 5, soundEnabled: true, tickSound: true },
+  points: { correct: 100, wrong: 0, penalty: -50 }
+};
+
+const DEFAULT_MATCH = {
+  currentQuestion: 1,
+  history: [],
+  isFinished: false
+};
+
+export default function App() {
+  const [activeView, setActiveView] = useState('setup');
+  const [setup, setSetup] = useState(DEFAULT_SETUP);
+  const [match, setMatch] = useState(DEFAULT_MATCH);
+  const [timer, setTimer] = useState({ timeLeft: 30, isRunning: false, isTimeUp: false });
+  
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [modal, setModal] = useState({ isOpen: false, title: '', message: '', onConfirm: null });
+  const [manualInputs, setManualInputs] = useState({});
+
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const savedSetup = localStorage.getItem('lcc_setup_v2');
+    const savedMatch = localStorage.getItem('lcc_match_v2');
+    if (savedSetup && savedMatch) {
+      setModal({
+        isOpen: true,
+        title: 'Sesi Ditemukan',
+        message: 'Terdapat data pertandingan sebelumnya. Ingin melanjutkannya?',
+        confirmText: 'Lanjutkan',
+        cancelText: 'Mulai Baru',
+        onConfirm: () => {
+          setSetup(JSON.parse(savedSetup));
+          setMatch(JSON.parse(savedMatch));
+          setActiveView('dashboard');
+          setModal({ isOpen: false });
+        },
+        onCancel: () => {
+          localStorage.removeItem('lcc_setup_v2');
+          localStorage.removeItem('lcc_match_v2');
+          setModal({ isOpen: false });
+        }
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeView !== 'setup') {
+      localStorage.setItem('lcc_setup_v2', JSON.stringify(setup));
+      localStorage.setItem('lcc_match_v2', JSON.stringify(match));
+    }
+  }, [setup, match, activeView]);
+
+  useEffect(() => {
+    let interval = null;
+    if (timer.isRunning && timer.timeLeft > 0) {
+      interval = setInterval(() => {
+        setTimer(prev => {
+          const newTime = prev.timeLeft - 1;
+          
+          if (setup.timer.soundEnabled) {
+            if (setup.timer.tickSound && newTime > 0) {
+              playSound('tick');
+            }
+          }
+          
+          if (newTime === setup.timer.warningAt && setup.timer.soundEnabled) {
+            playSound('warning');
+          }
+          
+          if (newTime === 0) {
+            if (setup.timer.soundEnabled) playSound('timeout');
+            return { timeLeft: 0, isRunning: false, isTimeUp: true };
+          }
+          
+          return { ...prev, timeLeft: newTime };
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [timer.isRunning, timer.timeLeft, setup.timer]);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().catch(err => {
+        console.error(`Error attempting fullscreen: ${err.message}`);
+      });
+    } else {
+      document.exitFullscreen();
+    }
+  };
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  const handleTimerToggle = () => {
+    if (timer.isTimeUp) {
+       setTimer({ timeLeft: setup.timer.duration, isRunning: true, isTimeUp: false });
+    } else {
+       setTimer(prev => ({ ...prev, isRunning: !prev.isRunning }));
+    }
+  };
+
+  const handleTimerReset = () => {
+    setTimer({ timeLeft: setup.timer.duration, isRunning: false, isTimeUp: false });
+  };
+
+  const updateScore = (teamId, changeAmount, note = '') => {
+    const team = setup.teams.find(t => t.id === teamId);
+    if (!team) return;
+
+    const oldScore = team.score;
+    const newScore = oldScore + changeAmount;
+    
+    if (setup.timer.soundEnabled) playSound('click');
+
+    setSetup(prev => ({
+      ...prev,
+      teams: prev.teams.map(t => t.id === teamId ? { ...t, score: newScore } : t)
+    }));
+
+    setMatch(prev => {
+      let nextQ = prev.currentQuestion;
+      if (setup.autoNextQuestion && changeAmount > 0) {
+        nextQ = Math.min(prev.currentQuestion + 1, setup.totalQuestions);
+      }
+
+      return {
+        ...prev,
+        currentQuestion: nextQ,
+        history: [{
+          id: Date.now().toString(),
+          timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          teamId: teamId,
+          teamName: team.name,
+          change: changeAmount,
+          oldScore,
+          newScore,
+          oldQuestion: prev.currentQuestion,
+          note: note || `Manual Update`,
+          question: prev.currentQuestion
+        }, ...prev.history].slice(0, 50)
+      };
+    });
+  };
+
+  const handleManualPointSubmit = (e, teamId) => {
+    e.preventDefault();
+    const inputVal = manualInputs[teamId];
+    if (!teamId || !inputVal) return;
+    const amount = parseInt(inputVal);
+    if (!isNaN(amount)) {
+      updateScore(teamId, amount, 'Input Manual');
+      setManualInputs(prev => ({...prev, [teamId]: ""}));
+    }
+  };
+
+  const undoLastAction = () => {
+    if (match.history.length === 0) return;
+    
+    const lastAction = match.history[0];
+    
+    setSetup(prev => ({
+      ...prev,
+      teams: prev.teams.map(t => t.id === lastAction.teamId ? { ...t, score: lastAction.oldScore } : t)
+    }));
+
+    setMatch(prev => ({
+      ...prev,
+      currentQuestion: lastAction.oldQuestion || prev.currentQuestion,
+      history: prev.history.slice(1)
+    }));
+  };
+
+  const resetAllScores = () => {
+    setModal({
+      isOpen: true,
+      title: 'Reset Semua Skor?',
+      message: 'Apakah Anda yakin ingin mengatur ulang skor semua tim menjadi 0? Riwayat juga akan dihapus.',
+      confirmText: 'Ya, Reset Skor',
+      cancelText: 'Batal',
+      isDanger: true,
+      onConfirm: () => {
+        setSetup(prev => ({
+          ...prev,
+          teams: prev.teams.map(t => ({ ...t, score: 0 }))
+        }));
+        setMatch(prev => ({ ...prev, history: [] }));
+        setModal({ isOpen: false });
+      }
+    });
+  };
+
+  const startMatch = () => {
+    setTimer({ timeLeft: setup.timer.duration, isRunning: false, isTimeUp: false });
+    setMatch(prev => ({ ...prev, isFinished: false }));
+    setActiveView('dashboard');
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  };
+
+  const exportCSV = () => {
+    const sortedTeams = [...setup.teams].sort((a, b) => b.score - a.score);
+    let csvContent = "data:text/csv;charset=utf-8,";
+    csvContent += `Nama Lomba: ${setup.eventName}\n`;
+    csvContent += `Tanggal: ${setup.date}\n\n`;
+    csvContent += "Peringkat,Nama Tim,Skor Akhir\n";
+    
+    sortedTeams.forEach((team, index) => {
+      csvContent += `${index + 1},${team.name},${team.score}\n`;
+    });
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `Hasil_LCC_${setup.date}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const formatTime = (seconds) => {
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const s = (seconds % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
+
+  const getTimerColor = () => {
+    if (timer.isTimeUp) return 'text-red-500 animate-pulse drop-shadow-[0_0_20px_rgba(239,68,68,0.9)]';
+    if (timer.timeLeft <= setup.timer.warningAt) return 'text-amber-400 drop-shadow-[0_0_20px_rgba(245,158,11,0.9)]';
+    return 'text-cyan-400 drop-shadow-[0_0_20px_rgba(34,211,238,0.9)]';
+  };
+
+  const handleFinishMatch = () => {
+    setModal({
+      isOpen: true,
+      title: 'Akhiri Pertandingan?',
+      message: 'Apakah Anda yakin ingin menyelesaikan lomba ini? Hasil akhir akan langsung ditampilkan.',
+      confirmText: 'Ya, Selesai & Lihat Hasil',
+      cancelText: 'Batal',
+      isDanger: false,
+      onConfirm: () => {
+        setMatch(prev => ({ ...prev, isFinished: true }));
+        setActiveView('scoreboard');
+        setModal({ isOpen: false });
+      }
+    });
+  };
+
+  const renderSetupView = () => (
+    <div className="h-full w-full p-4 md:p-6 flex flex-col justify-between max-w-7xl mx-auto bg-slate-950 text-slate-100 relative overflow-hidden">
+      <div className="absolute top-0 right-0 w-96 h-96 bg-blue-600/10 rounded-full blur-[120px] pointer-events-none"></div>
+      <div className="absolute bottom-0 left-0 w-96 h-96 bg-purple-600/10 rounded-full blur-[120px] pointer-events-none"></div>
+
+      <div className="text-center mb-2 flex-shrink-0 relative z-10">
+        <div className="inline-flex items-center justify-center p-2.5 bg-blue-500/10 text-blue-400 rounded-2xl mb-1 border border-blue-500/20 shadow-lg">
+          <Trophy className="w-7 h-7" />
+        </div>
+        <h1 className="text-2xl md:text-3xl font-black text-white tracking-tight">Sistem Penilaian LCC</h1>
+        <p className="text-xs md:text-sm text-slate-400 font-medium">Panel Konfigurasi Pertandingan & Papan Skor Profesional</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1 min-h-0 overflow-hidden relative z-10 py-1">
+        
+        {/* Kolom 1: Informasi Umum & Tim */}
+        <div className="space-y-3 flex flex-col overflow-hidden bg-slate-900/80 p-4 rounded-3xl border border-white/10 shadow-xl backdrop-blur-md">
+          <h2 className="text-sm font-bold text-blue-400 flex items-center mb-1"><Settings className="w-4 h-4 mr-2"/> Informasi & Tim</h2>
+          
+          <div className="space-y-2 flex-shrink-0">
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-400 mb-1">Nama Lomba</label>
+              <input type="text" value={setup.eventName} onChange={e => setSetup({...setup, eventName: e.target.value})} className="w-full p-2 bg-slate-800 border border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-xs text-white font-medium" />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">Tanggal</label>
+                <input type="date" value={setup.date} onChange={e => setSetup({...setup, date: e.target.value})} className="w-full p-2 bg-slate-800 border border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-xs text-white font-medium" />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-400 mb-1">Total Soal</label>
+                <input type="number" value={setup.totalQuestions} onChange={e => setSetup({...setup, totalQuestions: parseInt(e.target.value) || 1})} className="w-full p-2 bg-slate-800 border border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-xs text-white font-medium text-center" />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1 flex flex-col min-h-0 pt-2 border-t border-white/10">
+            <div className="flex justify-between items-center mb-2 flex-shrink-0">
+              <span className="text-xs font-bold text-slate-300 flex items-center"><Users className="w-3.5 h-3.5 mr-1.5 text-indigo-400"/> Daftar Tim ({setup.teams.length})</span>
+              <div className="flex space-x-1">
+                <button onClick={() => {
+                  if (setup.teams.length > 2) {
+                    setSetup({...setup, teams: setup.teams.slice(0, -1), teamCount: setup.teamCount - 1});
+                  }
+                }} className="p-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300"><Minus className="w-3 h-3"/></button>
+                <button onClick={() => {
+                  const newId = `t${Date.now()}`;
+                  const color = TEAM_COLORS[setup.teams.length % TEAM_COLORS.length];
+                  setSetup({...setup, teams: [...setup.teams, { id: newId, name: `Tim ${setup.teams.length + 1}`, color, score: 0 }], teamCount: setup.teamCount + 1});
+                }} className="p-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300"><Plus className="w-3 h-3"/></button>
+              </div>
+            </div>
+            
+            <div className="space-y-1.5 flex-1 overflow-y-auto pr-1">
+              {setup.teams.map((team, idx) => (
+                <div key={team.id} className="flex items-center space-x-2 bg-slate-800/60 p-1.5 rounded-xl border border-white/5">
+                  <div className={`w-5 h-5 rounded-full ${team.color} flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white`}>{idx+1}</div>
+                  <input type="text" value={team.name} onChange={e => {
+                    const newTeams = [...setup.teams];
+                    newTeams[idx].name = e.target.value;
+                    setSetup({...setup, teams: newTeams});
+                  }} className="w-full p-1 bg-transparent border-b border-transparent focus:border-blue-400 text-xs font-semibold text-white outline-none" />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Kolom 2: Timer & Suara */}
+        <div className="space-y-3 flex flex-col overflow-hidden bg-slate-900/80 p-4 rounded-3xl border border-white/10 shadow-xl backdrop-blur-md">
+          <h2 className="text-sm font-bold text-emerald-400 flex items-center mb-1"><Clock className="w-4 h-4 mr-2"/> Pengaturan Timer</h2>
+          
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-slate-800/80 p-2.5 rounded-2xl border border-white/5 text-center">
+              <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Durasi (Detik)</label>
+              <input type="number" value={setup.timer.duration} onChange={e => setSetup({...setup, timer: {...setup.timer, duration: parseInt(e.target.value)||0}})} className="w-full p-1 bg-slate-900 border border-slate-700 rounded-lg text-lg font-mono font-bold text-cyan-400 text-center outline-none" />
+            </div>
+            <div className="bg-slate-800/80 p-2.5 rounded-2xl border border-white/5 text-center">
+              <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Warning (Detik)</label>
+              <input type="number" value={setup.timer.warningAt} onChange={e => setSetup({...setup, timer: {...setup.timer, warningAt: parseInt(e.target.value)||0}})} className="w-full p-1 bg-slate-900 border border-slate-700 rounded-lg text-lg font-mono font-bold text-amber-400 text-center outline-none" />
+            </div>
+          </div>
+
+          <div className="space-y-2 pt-2 border-t border-white/10">
+            <div className="flex items-center justify-between p-2.5 bg-slate-800/60 rounded-xl border border-white/5">
+              <span className="text-xs font-semibold text-slate-300 flex items-center"><Volume2 className="w-3.5 h-3.5 mr-1.5 text-emerald-400"/> Suara Timer</span>
+              <input type="checkbox" checked={setup.timer.soundEnabled} onChange={e => setSetup({...setup, timer: {...setup.timer, soundEnabled: e.target.checked}})} className="w-4 h-4 accent-emerald-500 rounded cursor-pointer" />
+            </div>
+            <div className="flex items-center justify-between p-2.5 bg-slate-800/60 rounded-xl border border-white/5">
+              <span className="text-xs font-semibold text-slate-300">Suara Detik (Tick)</span>
+              <input type="checkbox" checked={setup.timer.tickSound} onChange={e => setSetup({...setup, timer: {...setup.timer, tickSound: e.target.checked}})} className="w-4 h-4 accent-emerald-500 rounded cursor-pointer" />
+            </div>
+            <div className="flex items-center justify-between p-2.5 bg-slate-800/60 rounded-xl border border-white/5">
+              <span className="text-xs font-semibold text-slate-300">Auto Next Soal (+ Poin)</span>
+              <input type="checkbox" checked={setup.autoNextQuestion} onChange={e => setSetup({...setup, autoNextQuestion: e.target.checked})} className="w-4 h-4 accent-emerald-500 rounded cursor-pointer" />
+            </div>
+          </div>
+
+          <div className="mt-auto pt-2 text-center">
+            <button onClick={() => playSound('warning')} className="w-full py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded-xl font-bold text-xs flex items-center justify-center transition-colors">
+              <Volume2 className="w-3.5 h-3.5 mr-1.5"/> Tes Suara Peringatan
+            </button>
+          </div>
+        </div>
+
+        {/* Kolom 3: Pengaturan Poin */}
+        <div className="space-y-3 flex flex-col overflow-hidden bg-slate-900/80 p-4 rounded-3xl border border-white/10 shadow-xl backdrop-blur-md">
+          <h2 className="text-sm font-bold text-amber-400 flex items-center mb-1"><Hash className="w-4 h-4 mr-2"/> Pengaturan Poin (3 Kategori)</h2>
+          
+          <div className="space-y-2.5 flex-1">
+            <div className="bg-green-500/10 p-3 rounded-2xl border border-green-500/20">
+              <label className="block text-[11px] font-bold text-green-400 uppercase mb-1">Poin Benar</label>
+              <input type="number" value={setup.points.correct} onChange={e => setSetup({...setup, points: {...setup.points, correct: parseInt(e.target.value)||0}})} className="w-full p-1.5 bg-slate-900 border border-green-500/30 rounded-xl text-center font-black text-green-400 text-lg outline-none" />
+            </div>
+
+            <div className="bg-blue-500/10 p-3 rounded-2xl border border-blue-500/20">
+              <label className="block text-[11px] font-bold text-blue-400 uppercase mb-1">Poin Salah</label>
+              <input type="number" value={setup.points.wrong} onChange={e => setSetup({...setup, points: {...setup.points, wrong: parseInt(e.target.value)||0}})} className="w-full p-1.5 bg-slate-900 border border-blue-500/30 rounded-xl text-center font-black text-blue-400 text-lg outline-none" />
+            </div>
+
+            <div className="bg-red-500/10 p-3 rounded-2xl border border-red-500/20">
+              <label className="block text-[11px] font-bold text-red-400 uppercase mb-1">Poin Penalti</label>
+              <input type="number" value={setup.points.penalty} onChange={e => setSetup({...setup, points: {...setup.points, penalty: parseInt(e.target.value)||0}})} className="w-full p-1.5 bg-slate-900 border border-red-500/30 rounded-xl text-center font-black text-red-400 text-lg outline-none" />
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div className="mt-2 pt-2 border-t border-white/10 flex justify-center relative z-10 flex-shrink-0">
+         <button onClick={startMatch} className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white px-10 py-3 rounded-2xl font-black text-lg flex items-center shadow-[0_10px_25px_-5px_rgba(79,70,229,0.5)] transition-all transform hover:-scale-105 active:scale-95">
+           MULAI PERTANDINGAN <Play className="ml-2 w-5 h-5" fill="currentColor"/>
+         </button>
+      </div>
+    </div>
+  );
+
+  const renderDashboardView = () => (
+    <div className="flex flex-col h-full w-full bg-slate-950 text-slate-100 overflow-hidden relative">
+      <div className="absolute inset-0 bg-gradient-to-br from-slate-950 via-indigo-950/40 to-slate-950 z-0"></div>
+
+      <header className="bg-slate-900/90 backdrop-blur-md border-b border-white/10 px-4 py-2.5 flex justify-between items-center shadow-lg z-10 flex-shrink-0">
+        <div className="flex items-center space-x-3">
+           <button onClick={() => setActiveView('setup')} className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-xl border border-white/10 transition-colors flex items-center text-xs font-bold">
+             <Home className="w-4 h-4 mr-1.5"/> Setup
+           </button>
+           <div className="h-5 w-px bg-slate-700"></div>
+           <div>
+             <h1 className="font-bold text-sm md:text-base text-white truncate max-w-xs">{setup.eventName}</h1>
+           </div>
+           <div className="h-5 w-px bg-slate-700"></div>
+           <div className="flex items-center space-x-2 bg-slate-800/80 rounded-xl px-3 py-1 border border-white/5">
+              <span className="text-xs text-slate-400 font-semibold">Soal:</span>
+              <button onClick={() => setMatch(prev => ({...prev, currentQuestion: Math.max(1, prev.currentQuestion - 1)}))} className="p-0.5 hover:bg-slate-700 text-slate-300 rounded"><Minus className="w-3 h-3"/></button>
+              <span className="font-black text-sm text-white">{match.currentQuestion} / {setup.totalQuestions}</span>
+              <button onClick={() => setMatch(prev => ({...prev, currentQuestion: Math.min(setup.totalQuestions, prev.currentQuestion + 1)}))} className="p-0.5 hover:bg-slate-700 text-slate-300 rounded"><Plus className="w-3 h-3"/></button>
+              <button onClick={() => setMatch(prev => ({...prev, currentQuestion: 1}))} className="p-1 hover:bg-slate-700 text-slate-400 hover:text-white rounded ml-1" title="Reset Soal"><RotateCcw className="w-3 h-3"/></button>
+           </div>
+        </div>
+        <div className="flex space-x-2">
+          <button onClick={handleFinishMatch} className="bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 text-white px-3.5 py-1.5 rounded-xl font-black flex items-center text-xs shadow-lg">
+            <Check className="w-4 h-4 mr-1"/> SELESAI
+          </button>
+          <button onClick={() => setActiveView('scoreboard')} className="bg-gradient-to-r from-yellow-500 to-amber-500 hover:from-yellow-400 text-slate-950 px-3.5 py-1.5 rounded-xl font-black flex items-center text-xs shadow-lg">
+            <Trophy className="w-4 h-4 mr-1"/> SKOR
+          </button>
+          <button onClick={toggleFullscreen} className="p-2 bg-slate-800 hover:bg-slate-700 border border-white/10 rounded-xl text-slate-300">
+            {isFullscreen ? <Minimize className="w-4 h-4"/> : <Maximize className="w-4 h-4"/>}
+          </button>
+        </div>
+      </header>
+
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative z-10 p-3 gap-3">
+        
+        {/* Kiri: Timer & Control Utama */}
+        <div className="w-full lg:w-80 flex flex-col gap-3 flex-shrink-0">
+          
+          <div className="bg-slate-900/90 backdrop-blur-md rounded-3xl border border-white/10 shadow-xl p-4 flex flex-col items-center justify-center relative">
+             {timer.isTimeUp && <div className="absolute inset-0 bg-red-500/10 animate-pulse rounded-3xl pointer-events-none"></div>}
+             
+             <div className="flex justify-between w-full items-center mb-1">
+               <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center"><Clock className="w-3.5 h-3.5 mr-1 text-cyan-400"/> Timer</span>
+               <div className="flex items-center space-x-1">
+                 <input 
+                    type="number" 
+                    value={setup.timer.duration}
+                    onChange={(e) => {
+                      const dur = parseInt(e.target.value) || 0;
+                      setSetup(prev => ({...prev, timer: {...prev.timer, duration: dur}}));
+                      if (!timer.isRunning) setTimer(prev => ({...prev, timeLeft: dur, isTimeUp: false}));
+                    }}
+                    className="w-12 p-0.5 text-center bg-slate-800 border border-slate-700 rounded text-xs font-bold text-white outline-none"
+                 />
+                 <span className="text-[10px] text-slate-400">s</span>
+               </div>
+             </div>
+
+             <div className={`font-mono text-6xl md:text-7xl font-black tracking-tighter ${getTimerColor()} my-2 select-none`}>
+                {timer.isTimeUp ? "HABIS" : formatTime(timer.timeLeft)}
+             </div>
+
+             <div className="flex space-x-2 w-full mt-1">
+               <button onClick={handleTimerToggle} className={`flex-1 py-2.5 rounded-2xl font-black text-sm md:text-base flex justify-center items-center shadow-lg transition-all ${timer.isRunning ? 'bg-amber-500 hover:bg-amber-400 text-slate-950' : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'}`}>
+                  {timer.isRunning ? <><Pause className="mr-1.5 w-4 h-4" fill="currentColor"/> PAUSE</> : <><Play className="mr-1.5 w-4 h-4" fill="currentColor"/> START</>}
+               </button>
+               <button onClick={handleTimerReset} className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-2xl font-bold text-sm flex items-center shadow-lg">
+                  <RotateCcw className="w-4 h-4"/>
+               </button>
+             </div>
+          </div>
+
+          <div className="bg-slate-900/90 backdrop-blur-md rounded-3xl border border-white/10 shadow-xl p-3 flex-1 flex flex-col overflow-hidden">
+             <div className="flex justify-between items-center mb-2 px-1">
+               <span className="text-xs font-bold text-slate-300">Riwayat Poin</span>
+               <button onClick={undoLastAction} disabled={match.history.length === 0} className="text-[10px] px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-bold disabled:opacity-40 flex items-center">
+                 <Undo2 className="w-3 h-3 mr-1"/> Undo
+               </button>
+             </div>
+             <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+                {match.history.length === 0 ? (
+                  <div className="text-center text-xs text-slate-500 mt-10">Belum ada aktivitas</div>
+                ) : (
+                  match.history.map((log) => (
+                    <div key={log.id} className="bg-slate-800/60 p-2 rounded-xl border border-white/5 text-xs flex justify-between items-center">
+                       <div>
+                          <span className="font-bold text-white">{log.teamName}</span>
+                          <div className="text-[10px] text-slate-400">{log.note}</div>
+                       </div>
+                       <div className="text-right">
+                          <span className={`font-mono font-black ${log.change > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {log.change > 0 ? `+${log.change}` : log.change}
+                          </span>
+                          <div className="text-[9px] text-slate-500">Skor: {log.newScore}</div>
+                       </div>
+                    </div>
+                  ))
+                )}
+             </div>
+          </div>
+
+        </div>
+
+        {/* Kanan: Grid Kartu Tim (Rebutan & Kontrol Poin Langsung) */}
+        <div className="flex-1 bg-slate-900/60 backdrop-blur-md rounded-3xl border border-white/10 p-3 overflow-hidden flex flex-col">
+           <div className="mb-2 px-1 flex justify-between items-center flex-shrink-0">
+             <h2 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Panel Kontrol Tim (Mode Rebutan / Umum)</h2>
+             <span className="text-[11px] text-slate-400">Klik tombol poin untuk langsung mencatat nilai</span>
+           </div>
+
+           <div className={`grid grid-cols-1 ${setup.teams.length > 2 ? 'md:grid-cols-2' : ''} ${setup.teams.length > 4 ? 'xl:grid-cols-3' : ''} gap-3 flex-1 overflow-y-auto pr-1 custom-scrollbar`}>
+              {setup.teams.map(team => (
+                <div key={team.id} className="bg-slate-900/90 rounded-2xl border border-white/10 p-3 flex flex-col justify-between relative overflow-hidden shadow-xl">
+                   <div className={`absolute top-0 left-0 right-0 h-1.5 ${team.color}`}></div>
+                   
+                   <div className="flex justify-between items-center mb-2 mt-1">
+                      <h3 className="font-black text-base text-white truncate pr-2">{team.name}</h3>
+                      <div className="font-mono font-black text-3xl text-yellow-400">{team.score}</div>
+                   </div>
+
+                   <div className="grid grid-cols-3 gap-1.5 mb-2">
+                      <button onClick={() => updateScore(team.id, setup.points.correct, 'Jawaban Benar')} className="py-2 bg-green-500/10 hover:bg-green-500/20 text-green-400 border border-green-500/30 rounded-xl font-bold text-xs flex flex-col items-center justify-center transition-all active:scale-95">
+                         <span className="text-[10px] opacity-70">BENAR</span>
+                         <span className="text-sm">+{setup.points.correct}</span>
+                      </button>
+                      <button onClick={() => updateScore(team.id, setup.points.wrong, 'Jawaban Salah')} className="py-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl font-bold text-xs flex flex-col items-center justify-center transition-all active:scale-95">
+                         <span className="text-[10px] opacity-70">SALAH</span>
+                         <span className="text-sm">{setup.points.wrong}</span>
+                      </button>
+                      <button onClick={() => updateScore(team.id, setup.points.penalty, 'Penalti')} className="py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded-xl font-bold text-xs flex flex-col items-center justify-center transition-all active:scale-95">
+                         <span className="text-[10px] opacity-70">PENALTI</span>
+                         <span className="text-sm">{setup.points.penalty}</span>
+                      </button>
+                   </div>
+
+                   <form onSubmit={(e) => handleManualPointSubmit(e, team.id)} className="flex gap-1">
+                      <input 
+                        type="number" 
+                        value={manualInputs[team.id] || ''} 
+                        onChange={e => setManualInputs({...manualInputs, [team.id]: e.target.value})}
+                        placeholder="Manual (+/-)"
+                        className="flex-1 px-2 py-1 bg-slate-800 border border-slate-700 rounded-lg text-white font-mono text-xs outline-none"
+                      />
+                      <button type="submit" className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-bold text-xs">OK</button>
+                   </form>
+                </div>
+              ))}
+           </div>
+        </div>
+
+      </div>
+    </div>
+  );
+
+  const renderScoreboardView = () => {
+    const sortedTeams = [...setup.teams].sort((a, b) => b.score - a.score);
+
+    return (
+      <div className="h-full w-full bg-slate-950 text-white p-4 md:p-6 flex flex-col relative overflow-hidden justify-between">
+        <div className="absolute inset-0 z-0 pointer-events-none">
+           <div className="absolute top-0 left-1/4 w-96 h-96 bg-yellow-500/10 rounded-full blur-[150px]"></div>
+           <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-blue-600/10 rounded-full blur-[150px]"></div>
+        </div>
+
+        <header className="flex justify-between items-center mb-2 relative z-10 flex-shrink-0">
+           <button onClick={() => setActiveView('dashboard')} className="text-slate-300 hover:text-white flex items-center font-bold px-4 py-2 bg-slate-900 border border-white/10 rounded-xl shadow-lg text-xs">
+             <Undo2 className="w-4 h-4 mr-1.5"/> Kembali ke Dashboard
+           </button>
+           <div className="flex space-x-2">
+              <button onClick={() => window.print()} className="bg-slate-900 hover:bg-slate-800 border border-white/10 px-4 py-2 rounded-xl flex items-center font-bold text-slate-300 text-xs">
+                 <Printer className="w-4 h-4 mr-1.5"/> Cetak
+              </button>
+              <button onClick={exportCSV} className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl flex items-center font-bold text-white text-xs shadow-lg">
+                 <Download className="w-4 h-4 mr-1.5"/> Export CSV
+              </button>
+           </div>
+        </header>
+
+        <div className="flex-1 flex flex-col items-center justify-center relative z-10 w-full max-w-5xl mx-auto overflow-hidden">
+           <div className="text-center mb-4 flex-shrink-0">
+              <div className="inline-block px-3 py-1 rounded-full bg-yellow-500/20 border border-yellow-500/30 text-yellow-400 font-bold text-xs tracking-widest mb-1 uppercase">
+                🏆 HASIL AKHIR PERTANDINGAN 🏆
+              </div>
+              <h1 className="text-3xl md:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 via-amber-400 to-yellow-500 mb-1">
+                PAPAN SKOR UTAMA
+              </h1>
+              <h2 className="text-sm md:text-base text-slate-400 font-medium">{setup.eventName}</h2>
+           </div>
+
+           <div className="w-full flex-1 overflow-y-auto space-y-2.5 pr-1 custom-scrollbar flex flex-col justify-center">
+             {sortedTeams.map((team, index) => {
+               const isFirst = index === 0;
+               return (
+                 <div key={team.id} className={`rounded-2xl p-3 md:p-4 flex items-center border transition-all relative overflow-hidden bg-slate-900/80 backdrop-blur-md ${isFirst ? 'border-yellow-500/50 shadow-[0_0_30px_rgba(234,179,8,0.2)]' : 'border-white/10'}`}>
+                   <div className={`absolute left-0 top-0 bottom-0 w-2 ${team.color}`}></div>
+                   
+                   <div className="w-14 text-center">
+                      {isFirst ? <Trophy className="w-8 h-8 mx-auto text-yellow-400 animate-bounce"/> : <span className="text-xl font-black text-slate-500">#{index + 1}</span>}
+                   </div>
+                   
+                   <div className="flex-1 px-4 border-l border-white/10 flex items-center">
+                      <div className={`w-6 h-6 rounded-full ${team.color} mr-3 border border-white/20`}></div>
+                      <h3 className="text-lg md:text-2xl font-black text-white">{team.name}</h3>
+                   </div>
+                   
+                   <div className="w-32 text-right pr-2">
+                      <div className="text-3xl md:text-4xl font-mono font-black text-yellow-400">{team.score}</div>
+                      <div className="text-[10px] text-slate-400 uppercase tracking-widest font-bold">Total Poin</div>
+                   </div>
+                 </div>
+               );
+             })}
+           </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="h-screen w-full font-sans bg-slate-950 overflow-hidden select-none" ref={containerRef}>
+      {activeView === 'setup' && renderSetupView()}
+      {activeView === 'dashboard' && renderDashboardView()}
+      {activeView === 'scoreboard' && renderScoreboardView()}
+
+      {modal.isOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 border border-white/10 rounded-3xl shadow-2xl max-w-md w-full overflow-hidden p-6 text-center">
+             <div className="flex justify-center mb-3">
+               {modal.isDanger ? <AlertTriangle className="w-10 h-10 text-red-500"/> : <Settings className="w-10 h-10 text-blue-400"/>}
+             </div>
+             <h3 className="text-lg font-bold text-white mb-2">{modal.title}</h3>
+             <p className="text-slate-300 text-sm mb-6">{modal.message}</p>
+             <div className="flex justify-center space-x-3">
+               <button onClick={modal.onCancel || (() => setModal({isOpen: false}))} className="px-5 py-2.5 rounded-xl font-semibold text-slate-300 bg-slate-800 hover:bg-slate-700 transition-colors">
+                 {modal.cancelText || 'Batal'}
+               </button>
+               <button onClick={modal.onConfirm} className={`px-5 py-2.5 rounded-xl font-semibold text-white transition-colors shadow-lg ${modal.isDanger ? 'bg-red-600 hover:bg-red-500 shadow-red-500/30' : 'bg-blue-600 hover:bg-blue-500 shadow-blue-500/30'}`}>
+                 {modal.confirmText || 'Konfirmasi'}
+               </button>
+             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
